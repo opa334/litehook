@@ -33,7 +33,7 @@ size_t _lth_fstrlen(FILE *f)
 	return sz;
 }
 
-uint32_t arm64_gen_movk(uint8_t x, uint16_t val, uint16_t lsl)
+uint32_t _lth_arm64_gen_movk(uint8_t x, uint16_t val, uint16_t lsl)
 {
 	uint32_t base = 0b11110010100000000000000000000000;
 
@@ -54,7 +54,7 @@ uint32_t arm64_gen_movk(uint8_t x, uint16_t val, uint16_t lsl)
 	return base | hw | imm16 | rd;
 }
 
-uint32_t arm64_gen_br(uint8_t x)
+uint32_t _lth_arm64_gen_br(uint8_t x)
 {
 	uint32_t base = 0b11010110000111110000000000000000;
 	uint32_t rn = ((uint32_t)x & 0x1F) << 5;
@@ -95,11 +95,11 @@ kern_return_t litehook_hook_function(void *source, void *target)
 	kr = litehook_unprotect((vm_address_t)toHook, 5*4);
 	if (kr != KERN_SUCCESS) return kr;
 
-	toHook[0] = arm64_gen_movk (16, targetAddr >>  0,  0);
-	toHook[1] = arm64_gen_movk (16, targetAddr >> 16, 16);
-	toHook[2] = arm64_gen_movk (16, targetAddr >> 32, 32);
-	toHook[3] = arm64_gen_movk (16, targetAddr >> 48, 48);
-	toHook[4] = arm64_gen_br   (16);
+	toHook[0] = _lth_arm64_gen_movk(16, targetAddr >>  0,  0);
+	toHook[1] = _lth_arm64_gen_movk(16, targetAddr >> 16, 16);
+	toHook[2] = _lth_arm64_gen_movk(16, targetAddr >> 32, 32);
+	toHook[3] = _lth_arm64_gen_movk(16, targetAddr >> 48, 48);
+	toHook[4] = _lth_arm64_gen_br(16);
 	uint32_t hookSize = 5 * sizeof(uint32_t);
 
 	kr = litehook_protect((vm_address_t)toHook, hookSize);
@@ -164,11 +164,18 @@ const char *litehook_locate_dsc(void)
 	static char dscPath[PATH_MAX] = {};
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		if (!access("/System/Library/Caches/com.apple.dyld", F_OK)) /* iOS <=15 */ {
-			strcpy(dscPath, "/System/Library/Caches/com.apple.dyld/dyld_shared_cache");
+		char *dyldSharedRegion   = getenv("DYLD_SHARED_REGION");
+		char *dyldSharedCacheDir = getenv("DYLD_SHARED_CACHE_DIR");
+		if (dyldSharedRegion && dyldSharedCacheDir && !strcmp(dyldSharedRegion, "private")) {
+			// If the local process uses a custom private dsc, use that as the path
+			strlcpy(dscPath, dyldSharedCacheDir, PATH_MAX);
+			strlcat(dscPath, "/dyld_shared_cache", PATH_MAX);
+		}
+		else if (!access("/System/Library/Caches/com.apple.dyld", F_OK)) /* iOS <=15 */ {
+			strlcpy(dscPath, "/System/Library/Caches/com.apple.dyld/dyld_shared_cache", PATH_MAX);
 		}
 		else if (!access("/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld", F_OK)) /* iOS >=16 */ {
-			strcpy(dscPath, "/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache");
+			strlcpy(dscPath, "/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache", PATH_MAX);
 		}
 
 		const char *suffixCandidates[] = {
@@ -180,12 +187,12 @@ const char *litehook_locate_dsc(void)
 		char *rChar = &dscPath[strlen(dscPath)];
 		for (int i = 0; i < sizeof(suffixCandidates)/sizeof(*suffixCandidates); i++) {
 			*rChar = '\0';
-			strcat(dscPath, suffixCandidates[i]);
+			strlcat(dscPath, suffixCandidates[i], PATH_MAX);
 			if (!access(dscPath, F_OK)) {
 				break;
 			}
 		}
-		if (access(dscPath, F_OK) != 0) strcpy(dscPath, "");
+		if (access(dscPath, F_OK) != 0) strlcpy(dscPath, "", PATH_MAX);
 	});
 	return (const char *)dscPath;
 }
