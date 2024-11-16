@@ -1,6 +1,7 @@
 #include "litehook.h"
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <sys/types.h>
 #include <string.h>
 #include <sys/fcntl.h>
