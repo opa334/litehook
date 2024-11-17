@@ -15,6 +15,8 @@ typedef struct section section;
 #define LC_SEGMENT_ARCH LC_SEGMENT
 #endif
 
+const char *litehook_locate_dsc(void);
+
 void *litehook_find_dsc_symbol(const char *imagePath, const char *symbolName);
 kern_return_t litehook_hook_function(void *source, void *target);
 void litehook_rebind_symbol(const mach_header *sourceHeader, void *replacement, void *replacee);
