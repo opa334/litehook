@@ -111,55 +111,6 @@ kern_return_t litehook_hook_function(void *source, void *target)
 	return KERN_SUCCESS;
 }
 
-void _litehook_rebind_symbol_in_section(const mach_header *sourceHeader, section *section, void *replacee, void *replacement)
-{
-	char segname[sizeof(section->segname)+1];
-	strlcpy(segname, section->segname, sizeof(segname));
-	char sectname[sizeof(section->sectname)+1];
-	strlcpy(sectname, section->sectname, sizeof(sectname));
-
-	unsigned long sectionSize = 0;
-	uint8_t *sectionStart = getsectiondata(sourceHeader, segname, sectname, &sectionSize);
-
-	bool auth = !strcmp(sectname, "__auth_got");
-
-	void **symbolPointers = (void **)sectionStart;
-	replacee = ptrauth_strip(ptrauth_auth_function(replacee, ptrauth_key_function_pointer, 0), ptrauth_key_function_pointer);
-
-	for (uint32_t i = 0; i < (sectionSize / sizeof(void *)); i++) {
-		void *symbolPointer = symbolPointers[i];
-		if (auth) symbolPointer = ptrauth_strip(ptrauth_auth_function(symbolPointers[i], ptrauth_key_function_pointer, &symbolPointers[i]), ptrauth_key_function_pointer);
-		printf("%p: %p vs %p\n", &symbolPointers[i], symbolPointer, replacee);
-		if (symbolPointer == replacee) {
-			litehook_unprotect((vm_address_t)&symbolPointers[i], sizeof(void *));
-			if (auth) replacement = ptrauth_auth_and_resign(replacement, ptrauth_key_function_pointer, 0, ptrauth_key_process_independent_code, &symbolPointers[i]);
-			symbolPointers[i] = replacement;
-		}
-	}
-}
-
-void litehook_rebind_symbol(const mach_header *sourceHeader, void *replacee, void *replacement)
-{
-	struct load_command *lcp = (void *)((uintptr_t)sourceHeader + sizeof(mach_header));
-	for(int i = 0; i < sourceHeader->ncmds; i++) {
-		if (lcp->cmd == LC_SEGMENT_ARCH) {
-			segment_command *segCmd = (segment_command *)lcp;
-			if (!strncmp(segCmd->segname, "__AUTH_CONST", sizeof(segCmd->segname)) ||
-				!strncmp(segCmd->segname, "__DATA_CONST", sizeof(segCmd->segname)) ||
-				!strncmp(segCmd->segname, "__DATA", sizeof(segCmd->segname))) {
-				section *sections = (void *)((uintptr_t)lcp + sizeof(segment_command));
-				for (int j = 0; j < segCmd->nsects; j++) {
-					if ((sections[j].flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS || 
-						(sections[j].flags & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS) {
-						_litehook_rebind_symbol_in_section(sourceHeader, &sections[j], replacee, replacement);
-					}
-				}
-			}
-		}
-		lcp = (void *)((uintptr_t)lcp + lcp->cmdsize);
-	}
-}
-
 const char *litehook_locate_dsc(void)
 {
 	static char dscPath[PATH_MAX] = {};
@@ -302,4 +253,113 @@ end:
 	}
 
 	return symbol;
+}
+
+void _litehook_rebind_symbol_in_section(const mach_header *targetHeader, section *section, void *replacee, void *replacement)
+{
+	char segname[sizeof(section->segname)+1];
+	strlcpy(segname, section->segname, sizeof(segname));
+	char sectname[sizeof(section->sectname)+1];
+	strlcpy(sectname, section->sectname, sizeof(sectname));
+
+	unsigned long sectionSize = 0;
+	uint8_t *sectionStart = getsectiondata(targetHeader, segname, sectname, &sectionSize);
+
+	bool auth = !strcmp(sectname, "__auth_got");
+
+	void **symbolPointers = (void **)sectionStart;
+	replacee = ptrauth_strip(ptrauth_auth_function(replacee, ptrauth_key_function_pointer, 0), ptrauth_key_function_pointer);
+
+	for (uint32_t i = 0; i < (sectionSize / sizeof(void *)); i++) {
+		void *symbolPointer = symbolPointers[i];
+		if (auth) symbolPointer = ptrauth_strip(ptrauth_auth_function(symbolPointers[i], ptrauth_key_function_pointer, &symbolPointers[i]), ptrauth_key_function_pointer);
+
+		if (symbolPointer == replacee) {
+			litehook_unprotect((vm_address_t)&symbolPointers[i], sizeof(void *));
+			if (auth) replacement = ptrauth_auth_and_resign(replacement, ptrauth_key_function_pointer, 0, ptrauth_key_process_independent_code, &symbolPointers[i]);
+			symbolPointers[i] = replacement;
+		}
+	}
+}
+
+void litehook_rebind_symbol(const mach_header *targetHeader, void *replacee, void *replacement)
+{
+	struct load_command *lcp = (void *)((uintptr_t)targetHeader + sizeof(mach_header));
+	for(int i = 0; i < targetHeader->ncmds; i++) {
+		if (lcp->cmd == LC_SEGMENT_ARCH) {
+			segment_command *segCmd = (segment_command *)lcp;
+			if (!strncmp(segCmd->segname, "__AUTH_CONST", sizeof(segCmd->segname)) ||
+				!strncmp(segCmd->segname, "__DATA_CONST", sizeof(segCmd->segname)) ||
+				!strncmp(segCmd->segname, "__DATA", sizeof(segCmd->segname))) {
+				section *sections = (void *)((uintptr_t)lcp + sizeof(segment_command));
+				for (int j = 0; j < segCmd->nsects; j++) {
+					if ((sections[j].flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS || 
+						(sections[j].flags & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS) {
+						_litehook_rebind_symbol_in_section(targetHeader, &sections[j], replacee, replacement);
+					}
+				}
+			}
+		}
+		lcp = (void *)((uintptr_t)lcp + lcp->cmdsize);
+	}
+}
+
+typedef struct {
+	const mach_header *sourceHeader;
+	void *replacee;
+	void *replacement;
+} global_rebind;
+
+uint32_t gRebindCount = 0;
+global_rebind *gRebinds = NULL;
+
+void _litehook_apply_global_rebind(const mach_header* mh, global_rebind *rebind)
+{
+	if (mh != rebind->sourceHeader) {
+		litehook_rebind_symbol(mh, rebind->replacee, rebind->replacement);
+	}
+}
+
+void _litehook_apply_global_rebinds(const mach_header* mh, intptr_t vmaddr_slide)
+{
+	if (!gRebinds || gRebindCount == 0) return;
+
+	for (uint32_t i = 0; i < gRebindCount; i++) {
+		// Apply all existing rebinds for newly loaded image
+		_litehook_apply_global_rebind(mh, &gRebinds[i]);
+	}
+}
+
+void litehook_rebind_symbol_globally(void *replacee, void *replacement)
+{
+	if (!replacee || !replacement) return;
+
+	// We need the mach_header in wich the replacement function lives, since we want to exclude it from the rebind
+	Dl_info replacementInfo = {};
+	if (dladdr(replacement, &replacementInfo) == 0) return;
+	if (replacementInfo.dli_fname == NULL) return;
+	const mach_header *sourceHeader = NULL;
+	for (unsigned i = 0; i < _dyld_image_count(); i++) {
+		if (!strcmp(_dyld_get_image_name(i), replacementInfo.dli_fname)) {
+			sourceHeader = (const mach_header *)_dyld_get_image_header(i);
+			break;
+		}
+	}
+	if (!sourceHeader) return;
+
+	if (!gRebinds) {
+		_dyld_register_func_for_add_image((void (*)(const struct mach_header *, intptr_t))_litehook_apply_global_rebinds);
+	}
+
+	gRebinds = realloc(gRebinds, sizeof(global_rebind) * ++gRebindCount);
+	gRebinds[gRebindCount-1] = (global_rebind){
+		.sourceHeader = sourceHeader,
+		.replacee = replacee,
+		.replacement = replacement,
+	};
+
+	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+		// Apply new rebind for all already loaded images
+		_litehook_apply_global_rebind((const mach_header *)_dyld_get_image_header(i), &gRebinds[gRebindCount-1]);
+	}
 }
