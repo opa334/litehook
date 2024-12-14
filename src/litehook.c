@@ -352,14 +352,14 @@ void litehook_rebind_symbol_globally(void *replacee, void *replacement)
 	}
 
 	gRebinds = realloc(gRebinds, sizeof(global_rebind) * ++gRebindCount);
-	gRebinds[gRebindCount-1] = (global_rebind){
-		.sourceHeader = sourceHeader,
-		.replacee = replacee,
-		.replacement = replacement,
-	};
+
+	global_rebind *rebind = &gRebinds[gRebindCount-1];
+	rebind->sourceHeader = sourceHeader;
+	rebind->replacee = replacee;
+	rebind->replacement = replacement;
 
 	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
 		// Apply new rebind for all already loaded images
-		_litehook_apply_global_rebind((const mach_header *)_dyld_get_image_header(i), &gRebinds[gRebindCount-1]);
+		_litehook_apply_global_rebind((const mach_header *)_dyld_get_image_header(i), rebind);
 	}
 }
