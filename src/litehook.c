@@ -276,8 +276,12 @@ void _litehook_rebind_symbol_in_section(const mach_header *targetHeader, section
 
 		if (symbolPointer == replacee) {
 			litehook_unprotect((vm_address_t)&symbolPointers[i], sizeof(void *));
-			if (auth) replacement = ptrauth_auth_and_resign(replacement, ptrauth_key_function_pointer, 0, ptrauth_key_process_independent_code, &symbolPointers[i]);
-			symbolPointers[i] = replacement;
+			if (auth) { 
+				symbolPointers[i] = ptrauth_auth_and_resign(replacement, ptrauth_key_function_pointer, 0, ptrauth_key_process_independent_code, &symbolPointers[i]);
+			}
+			else {
+				symbolPointers[i] = ptrauth_strip(replacement, ptrauth_key_function_pointer);
+			}
 		}
 	}
 }
