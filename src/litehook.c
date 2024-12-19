@@ -272,6 +272,8 @@ void _litehook_rebind_symbol_in_section(const mach_header *targetHeader, section
 
 	for (uint32_t i = 0; i < (sectionSize / sizeof(void *)); i++) {
 		void *symbolPointer = symbolPointers[i];
+		if (!symbolPointer) continue;
+
 		if (auth) symbolPointer = ptrauth_strip(ptrauth_auth_function(symbolPointers[i], ptrauth_key_function_pointer, &symbolPointers[i]), ptrauth_key_function_pointer);
 
 		if (symbolPointer == replacee) {
