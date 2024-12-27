@@ -322,7 +322,7 @@ void _litehook_apply_global_rebinds(const mach_header* mh, intptr_t vmaddr_slide
 
 void litehook_rebind_symbol(const mach_header *targetHeader, void *replacee, void *replacement, bool (*exceptionFilter)(const mach_header *header))
 {
-	if (!targetHeader) { // No header = Global
+	if (targetHeader == LITEHOOK_REBIND_GLOBAL) {
 		if (!replacee || !replacement) return;
 
 		// We need the mach_header in which the replacement function lives, since we want to exclude it from the rebind
