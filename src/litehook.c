@@ -19,6 +19,7 @@
 #include <dispatch/dispatch.h>
 #include <dyld_cache_format.h>
 #include <ptrauth.h>
+#include <sys/mman.h>
 
 size_t _lth_fstrlen(FILE *f)
 {
@@ -314,6 +315,7 @@ typedef struct {
 	const mach_header *sourceHeader;
 	void *replacee;
 	void *replacement;
+	bool (*exceptionFilter)(const mach_header *header);
 } global_rebind;
 
 uint32_t gRebindCount = 0;
@@ -322,7 +324,11 @@ global_rebind *gRebinds = NULL;
 void _litehook_apply_global_rebind(const mach_header* mh, global_rebind *rebind)
 {
 	if (mh != rebind->sourceHeader) {
-		litehook_rebind_symbol(mh, rebind->replacee, rebind->replacement);
+		bool filterAllowed = true;
+		if (rebind->exceptionFilter) filterAllowed = rebind->exceptionFilter(mh);
+		if (filterAllowed) {
+			litehook_rebind_symbol(mh, rebind->replacee, rebind->replacement);
+		}
 	}
 }
 
@@ -336,7 +342,7 @@ void _litehook_apply_global_rebinds(const mach_header* mh, intptr_t vmaddr_slide
 	}
 }
 
-void litehook_rebind_symbol_globally(void *replacee, void *replacement)
+void litehook_rebind_symbol_globally_except(void *replacee, void *replacement, bool (*exceptionFilter)(const mach_header *header))
 {
 	if (!replacee || !replacement) return;
 
@@ -363,9 +369,16 @@ void litehook_rebind_symbol_globally(void *replacee, void *replacement)
 	rebind->sourceHeader = sourceHeader;
 	rebind->replacee = replacee;
 	rebind->replacement = replacement;
+	rebind->exceptionFilter = exceptionFilter;
 
 	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+		const mach_header *header = (const mach_header *)_dyld_get_image_header(i);
 		// Apply new rebind for all already loaded images
-		_litehook_apply_global_rebind((const mach_header *)_dyld_get_image_header(i), rebind);
+		_litehook_apply_global_rebind(header, rebind);
 	}
+}
+
+void litehook_rebind_symbol_globally(void *replacee, void *replacement)
+{
+	litehook_rebind_symbol_globally_except(replacee, replacement, NULL);
 }

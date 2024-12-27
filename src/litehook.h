@@ -20,4 +20,5 @@ const char *litehook_locate_dsc(void);
 void *litehook_find_dsc_symbol(const char *imagePath, const char *symbolName);
 kern_return_t litehook_hook_function(void *source, void *target);
 void litehook_rebind_symbol(const mach_header *targetHeader, void *replacement, void *replacee);
+void litehook_rebind_symbol_globally_except(void *replacee, void *replacement, bool (*exceptionFilter)(const mach_header *header));
 void litehook_rebind_symbol_globally(void *replacee, void *replacement);
