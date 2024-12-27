@@ -289,28 +289,6 @@ void _litehook_rebind_symbol_in_section(const mach_header *targetHeader, section
 	}
 }
 
-void litehook_rebind_symbol(const mach_header *targetHeader, void *replacee, void *replacement)
-{
-	struct load_command *lcp = (void *)((uintptr_t)targetHeader + sizeof(mach_header));
-	for(int i = 0; i < targetHeader->ncmds; i++) {
-		if (lcp->cmd == LC_SEGMENT_ARCH) {
-			segment_command *segCmd = (segment_command *)lcp;
-			if (!strncmp(segCmd->segname, "__AUTH_CONST", sizeof(segCmd->segname)) ||
-				!strncmp(segCmd->segname, "__DATA_CONST", sizeof(segCmd->segname)) ||
-				!strncmp(segCmd->segname, "__DATA", sizeof(segCmd->segname))) {
-				section *sections = (void *)((uintptr_t)lcp + sizeof(segment_command));
-				for (int j = 0; j < segCmd->nsects; j++) {
-					if ((sections[j].flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS || 
-						(sections[j].flags & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS) {
-						_litehook_rebind_symbol_in_section(targetHeader, &sections[j], replacee, replacement);
-					}
-				}
-			}
-		}
-		lcp = (void *)((uintptr_t)lcp + lcp->cmdsize);
-	}
-}
-
 typedef struct {
 	const mach_header *sourceHeader;
 	void *replacee;
@@ -327,7 +305,7 @@ void _litehook_apply_global_rebind(const mach_header* mh, global_rebind *rebind)
 		bool filterAllowed = true;
 		if (rebind->exceptionFilter) filterAllowed = rebind->exceptionFilter(mh);
 		if (filterAllowed) {
-			litehook_rebind_symbol(mh, rebind->replacee, rebind->replacement);
+			litehook_rebind_symbol(mh, rebind->replacee, rebind->replacement, NULL);
 		}
 	}
 }
@@ -342,43 +320,60 @@ void _litehook_apply_global_rebinds(const mach_header* mh, intptr_t vmaddr_slide
 	}
 }
 
-void litehook_rebind_symbol_globally_except(void *replacee, void *replacement, bool (*exceptionFilter)(const mach_header *header))
+void litehook_rebind_symbol(const mach_header *targetHeader, void *replacee, void *replacement, bool (*exceptionFilter)(const mach_header *header))
 {
-	if (!replacee || !replacement) return;
+	if (!targetHeader) { // No header = Global
+		if (!replacee || !replacement) return;
 
-	// We need the mach_header in wich the replacement function lives, since we want to exclude it from the rebind
-	Dl_info replacementInfo = {};
-	if (dladdr(replacement, &replacementInfo) == 0) return;
-	if (replacementInfo.dli_fname == NULL) return;
-	const mach_header *sourceHeader = NULL;
-	for (unsigned i = 0; i < _dyld_image_count(); i++) {
-		if (!strcmp(_dyld_get_image_name(i), replacementInfo.dli_fname)) {
-			sourceHeader = (const mach_header *)_dyld_get_image_header(i);
-			break;
+		// We need the mach_header in which the replacement function lives, since we want to exclude it from the rebind
+		Dl_info replacementInfo = {};
+		if (dladdr(replacement, &replacementInfo) == 0) return;
+		if (replacementInfo.dli_fname == NULL) return;
+		const mach_header *sourceHeader = NULL;
+		for (unsigned i = 0; i < _dyld_image_count(); i++) {
+			if (!strcmp(_dyld_get_image_name(i), replacementInfo.dli_fname)) {
+				sourceHeader = (const mach_header *)_dyld_get_image_header(i);
+				break;
+			}
+		}
+		if (!sourceHeader) return;
+
+		if (!gRebinds) {
+			_dyld_register_func_for_add_image((void (*)(const struct mach_header *, intptr_t))_litehook_apply_global_rebinds);
+		}
+
+		gRebinds = realloc(gRebinds, sizeof(global_rebind) * ++gRebindCount);
+
+		global_rebind *rebind = &gRebinds[gRebindCount-1];
+		rebind->sourceHeader = sourceHeader;
+		rebind->replacee = replacee;
+		rebind->replacement = replacement;
+		rebind->exceptionFilter = exceptionFilter;
+
+		for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+			const mach_header *header = (const mach_header *)_dyld_get_image_header(i);
+			// Apply new rebind for all already loaded images
+			_litehook_apply_global_rebind(header, rebind);
 		}
 	}
-	if (!sourceHeader) return;
-
-	if (!gRebinds) {
-		_dyld_register_func_for_add_image((void (*)(const struct mach_header *, intptr_t))_litehook_apply_global_rebinds);
+	else {
+		struct load_command *lcp = (void *)((uintptr_t)targetHeader + sizeof(mach_header));
+		for(int i = 0; i < targetHeader->ncmds; i++) {
+			if (lcp->cmd == LC_SEGMENT_ARCH) {
+				segment_command *segCmd = (segment_command *)lcp;
+				if (!strncmp(segCmd->segname, "__AUTH_CONST", sizeof(segCmd->segname)) ||
+					!strncmp(segCmd->segname, "__DATA_CONST", sizeof(segCmd->segname)) ||
+					!strncmp(segCmd->segname, "__DATA", sizeof(segCmd->segname))) {
+					section *sections = (void *)((uintptr_t)lcp + sizeof(segment_command));
+					for (int j = 0; j < segCmd->nsects; j++) {
+						if ((sections[j].flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS || 
+							(sections[j].flags & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS) {
+							_litehook_rebind_symbol_in_section(targetHeader, &sections[j], replacee, replacement);
+						}
+					}
+				}
+			}
+			lcp = (void *)((uintptr_t)lcp + lcp->cmdsize);
+		}
 	}
-
-	gRebinds = realloc(gRebinds, sizeof(global_rebind) * ++gRebindCount);
-
-	global_rebind *rebind = &gRebinds[gRebindCount-1];
-	rebind->sourceHeader = sourceHeader;
-	rebind->replacee = replacee;
-	rebind->replacement = replacement;
-	rebind->exceptionFilter = exceptionFilter;
-
-	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-		const mach_header *header = (const mach_header *)_dyld_get_image_header(i);
-		// Apply new rebind for all already loaded images
-		_litehook_apply_global_rebind(header, rebind);
-	}
-}
-
-void litehook_rebind_symbol_globally(void *replacee, void *replacement)
-{
-	litehook_rebind_symbol_globally_except(replacee, replacement, NULL);
 }

@@ -26,7 +26,7 @@ int main(int argc, const char *argv[])
 
 	printf("About to test rebind...\n");
 
-	litehook_rebind_symbol((mach_header*)mainBinHeader, bind, bind_hook);
+	litehook_rebind_symbol((mach_header*)mainBinHeader, bind, bind_hook, NULL);
 
 	//getchar();
 
