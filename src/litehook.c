@@ -21,6 +21,55 @@
 #include <ptrauth.h>
 #include <sys/mman.h>
 
+#if __arm64__
+#define _COMM_PAGE_START_ADDRESS (0x0000000FFFFFC000ULL)
+#define _COMM_PAGE_TPRO_WRITE_ENABLE (_COMM_PAGE_START_ADDRESS + 0x0D0)
+#define _COMM_PAGE_TPRO_WRITE_DISABLE (_COMM_PAGE_START_ADDRESS + 0x0D8)
+
+static bool os_tpro_is_supported(void)
+{
+	if (*(uint64_t*)_COMM_PAGE_TPRO_WRITE_ENABLE) {
+		return true;
+	}
+	return false;
+}
+
+__attribute__((naked)) bool os_thread_self_tpro_is_writeable(void)
+{
+	__asm__ __volatile__ (
+		"mrs             x0, s3_6_c15_c1_5\n"
+		"ubfx            x0, x0, #0x24, #1;\n"
+		"ret\n"
+	);
+}
+
+void os_thread_self_restrict_tpro_to_rw(void)
+{
+	__asm__ __volatile__ (
+		"mov x0, %0\n"
+		"ldr x0, [x0]\n"
+		"msr s3_6_c15_c1_5, x0\n"
+		"isb sy\n"
+		:: "r" (_COMM_PAGE_TPRO_WRITE_ENABLE)
+		: "memory", "x0"
+	);
+	return;
+}
+
+void os_thread_self_restrict_tpro_to_ro(void)
+{
+	__asm__ __volatile__ (
+		"mov x0, %0\n"
+		"ldr x0, [x0]\n"
+		"msr s3_6_c15_c1_5, x0\n"
+		"isb sy\n"
+		:: "r" (_COMM_PAGE_TPRO_WRITE_DISABLE)
+		: "memory", "x0"
+	);
+	return;
+}
+#endif
+
 size_t _lth_fstrlen(FILE *f)
 {
 	size_t sz = 0;
@@ -167,11 +216,11 @@ uintptr_t litehook_get_dsc_slide(void)
 void *_litehook_sign_if_executable(void *ptr)
 {
 	vm_address_t region = (vm_address_t)ptr;
-    vm_size_t region_len = 0;
-    struct vm_region_submap_short_info_64 info;
-    mach_msg_type_number_t info_count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
-    natural_t max_depth = 99999;
-    kern_return_t kr = vm_region_recurse_64(mach_task_self(), &region, &region_len, &max_depth, (vm_region_recurse_info_t)&info, &info_count);
+	vm_size_t region_len = 0;
+	struct vm_region_submap_short_info_64 info;
+	mach_msg_type_number_t info_count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+	natural_t max_depth = 99999;
+	kern_return_t kr = vm_region_recurse_64(mach_task_self(), &region, &region_len, &max_depth, (vm_region_recurse_info_t)&info, &info_count);
 	if (info.protection & PROT_EXEC) {
 		return ptrauth_sign_unauthenticated(ptr, ptrauth_key_function_pointer, 0);
 	}
@@ -354,6 +403,15 @@ void _litehook_rebind_symbol_in_section(const mach_header_u *targetHeader, secti
 		if (auth) symbolPointer = ptrauth_strip(ptrauth_auth_function(symbolPointers[i], ptrauth_key_function_pointer, &symbolPointers[i]), ptrauth_key_function_pointer);
 
 		if (symbolPointer == replacee) {
+#if __arm64__
+			bool needsTPRORevert = false;
+			if (os_tpro_is_supported()) {
+				if (!os_thread_self_tpro_is_writeable()) {
+					os_thread_self_restrict_tpro_to_rw();
+					needsTPRORevert = true;
+				}
+			}
+#endif
 			litehook_unprotect((vm_address_t)&symbolPointers[i], sizeof(void *));
 			if (auth) { 
 				symbolPointers[i] = ptrauth_auth_and_resign(replacement, ptrauth_key_function_pointer, 0, ptrauth_key_process_independent_code, &symbolPointers[i]);
@@ -361,6 +419,11 @@ void _litehook_rebind_symbol_in_section(const mach_header_u *targetHeader, secti
 			else {
 				symbolPointers[i] = ptrauth_strip(replacement, ptrauth_key_function_pointer);
 			}
+#if __arm64__
+			if (needsTPRORevert) {
+				os_thread_self_restrict_tpro_to_ro();
+			}
+#endif
 		}
 	}
 }
