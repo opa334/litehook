@@ -136,29 +136,47 @@ kern_return_t litehook_protect(vm_address_t addr, vm_size_t size)
 	return litehook_vm_protect(mach_task_self(), addr, size, false, VM_PROT_READ | VM_PROT_EXECUTE);
 }
 
-kern_return_t litehook_hook_function(void *source, void *target)
+// Simple memcpy reimplementation since we can't have any external dependencies during critical section
+static void litehook_memcpy(void *target, void *source, size_t size)
 {
-	kern_return_t kr = KERN_SUCCESS;
+	uint8_t *targetBytes = target;
+	uint8_t *sourceBytes = source;
+	for (size_t i = 0; i < size; i++) {
+		targetBytes[i] = sourceBytes[i];
+	}
+}
 
-	uint32_t *toHook = (uint32_t*)ptrauth_strip(source, ptrauth_key_function_pointer);
-	uint64_t targetAddr = (uint64_t)ptrauth_strip(target, ptrauth_key_function_pointer);
-
-	kr = litehook_unprotect((vm_address_t)toHook, 5*4);
+kern_return_t litehook_hook_memory_default(void *target, void *source, size_t sourceSize)
+{
+	kern_return_t kr = litehook_unprotect((vm_address_t)target, sourceSize);
 	if (kr != KERN_SUCCESS) return kr;
 
-	toHook[0] = _lth_arm64_gen_movk(16, targetAddr >>  0,  0);
-	toHook[1] = _lth_arm64_gen_movk(16, targetAddr >> 16, 16);
-	toHook[2] = _lth_arm64_gen_movk(16, targetAddr >> 32, 32);
-	toHook[3] = _lth_arm64_gen_movk(16, targetAddr >> 48, 48);
-	toHook[4] = _lth_arm64_gen_br(16);
-	uint32_t hookSize = 5 * sizeof(uint32_t);
+	litehook_memcpy(target, source, sourceSize);
 
-	kr = litehook_protect((vm_address_t)toHook, hookSize);
+	kr = litehook_protect((vm_address_t)target, sourceSize);
 	if (kr != KERN_SUCCESS) return kr;
 
-	sys_icache_invalidate(toHook, hookSize);
+	sys_icache_invalidate(target, sourceSize);
 
 	return KERN_SUCCESS;
+}
+
+kern_return_t (*litehook_hook_memory)(void *target, void *source, size_t sourceSize) = litehook_hook_memory_default;
+
+kern_return_t litehook_hook_function(void *source, void *target)
+{
+	void *sourceUnsigned = ptrauth_strip(source, ptrauth_key_function_pointer);
+	void *targetUnsigned = ptrauth_strip(target, ptrauth_key_function_pointer);
+
+	uint32_t hookBytes[] = {
+		_lth_arm64_gen_movk(16, (uint64_t)targetUnsigned >>  0,  0),
+		_lth_arm64_gen_movk(16, (uint64_t)targetUnsigned >> 16, 16),
+		_lth_arm64_gen_movk(16, (uint64_t)targetUnsigned >> 32, 32),
+		_lth_arm64_gen_movk(16, (uint64_t)targetUnsigned >> 48, 48),
+		_lth_arm64_gen_br(16),
+	};
+
+	return litehook_hook_memory(sourceUnsigned, hookBytes, sizeof(hookBytes));
 }
 
 const char *litehook_locate_dsc(void)

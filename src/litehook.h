@@ -17,6 +17,8 @@ typedef struct nlist nlist_u;
 #define LC_SEGMENT_U LC_SEGMENT
 #endif
 
+extern kern_return_t (*litehook_hook_memory)(void *target, void *source, size_t sourceSize);
+
 const char *litehook_locate_dsc(void);
 
 void *litehook_find_symbol(const mach_header_u *header, const char *symbolName);
