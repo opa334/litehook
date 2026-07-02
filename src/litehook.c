@@ -231,18 +231,41 @@ uintptr_t litehook_get_dsc_slide(void)
 	return slide;
 }
 
+bool is_pointer_to_instructions(const struct mach_header_64 *header, uintptr_t ptr)
+{
+	const struct load_command *lc =
+		(const struct load_command *)((const uint8_t *)header + sizeof(struct mach_header_64));
+
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		if (lc->cmd == LC_SEGMENT_64) {
+			const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+			const struct section_64 *sect =
+				(const struct section_64 *)((const uint8_t *)seg + sizeof(struct segment_command_64));
+
+			for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+				uint64_t sectStart = (uintptr_t)header + sect->addr;
+				uint64_t sectEnd   = sectStart + sect->size;
+
+				if ((ptr >= sect->addr) && (ptr < sectEnd)) {
+					uint32_t attrs = sect->flags & SECTION_ATTRIBUTES_USR;
+					return (attrs & S_ATTR_PURE_INSTRUCTIONS) ||
+						   (attrs & S_ATTR_SOME_INSTRUCTIONS);
+				}
+			}
+		}
+		lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+	}
+
+	return false;
+}
+
 void *_litehook_sign_if_executable(void *ptr)
 {
-	vm_address_t region = (vm_address_t)ptr;
-	vm_size_t region_len = 0;
-	struct vm_region_submap_short_info_64 info;
-	mach_msg_type_number_t info_count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
-	natural_t max_depth = 99999;
-	kern_return_t kr = vm_region_recurse_64(mach_task_self(), &region, &region_len, &max_depth, (vm_region_recurse_info_t)&info, &info_count);
-	if (info.protection & PROT_EXEC) {
-		return ptrauth_sign_unauthenticated(ptr, ptrauth_key_function_pointer, 0);
-	}
-	return ptr;
+	Dl_info info;
+	if (!dladdr(ptr, &info)) return ptr;
+	const struct mach_header_64 *header = (const struct mach_header_64 *)info.dli_fbase;
+	if (!is_pointer_to_instructions(header, (uintptr_t)ptr)) return ptr;
+	return ptrauth_sign_unauthenticated(ptr, ptrauth_key_function_pointer, 0);
 }
 
 void *litehook_find_symbol(const mach_header_u *header, const char *symbolName)
