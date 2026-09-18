@@ -199,6 +199,7 @@ const char *litehook_locate_dsc(void)
 		}
 
 		const char *suffixCandidates[] = {
+			"_arm64e_x1",
 			"_arm64e",
 			"_arm64",
 			"_armv7s",
