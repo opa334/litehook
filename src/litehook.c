@@ -244,13 +244,12 @@ bool is_pointer_to_instructions(const mach_header_u *header, uintptr_t ptr)
 				(const struct section_64 *)((const uint8_t *)seg + sizeof(struct segment_command_64));
 
 			for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
-				uint64_t sectStart = (uintptr_t)header + sect->addr;
+				uint64_t sectStart = sect->addr;
 				uint64_t sectEnd   = sectStart + sect->size;
 
-				if ((ptr >= sect->addr) && (ptr < sectEnd)) {
-					uint32_t attrs = sect->flags & SECTION_ATTRIBUTES_USR;
-					return (attrs & S_ATTR_PURE_INSTRUCTIONS) ||
-						   (attrs & S_ATTR_SOME_INSTRUCTIONS);
+				if ((ptr >= sectStart) && (ptr < sectEnd)) {
+					return (sect->flags & S_ATTR_PURE_INSTRUCTIONS) ||
+						   (sect->flags & S_ATTR_SOME_INSTRUCTIONS);
 				}
 			}
 		}
@@ -260,7 +259,7 @@ bool is_pointer_to_instructions(const mach_header_u *header, uintptr_t ptr)
 	return false;
 }
 
-void *_litehook_sign_if_executable(void *ptr, const mach_header_u *optHeader)
+void *_litehook_sign_if_executable(void *ptr, uintptr_t slide, const mach_header_u *optHeader)
 {
 	const mach_header_u *header = optHeader;
 	if (!header) {
@@ -270,7 +269,7 @@ void *_litehook_sign_if_executable(void *ptr, const mach_header_u *optHeader)
 		}
 		header = (const mach_header_u *)info.dli_fbase;
 	}
-	if (!is_pointer_to_instructions(header, (uintptr_t)ptr)) {
+	if (!is_pointer_to_instructions(header, (uintptr_t)ptr - slide)) {
 		return ptr;
 	}
 	return ptrauth_sign_unauthenticated(ptr, ptrauth_key_function_pointer, 0);
@@ -331,7 +330,8 @@ void *litehook_find_symbol(const mach_header_u *header, const char *symbolName)
 		}
 
 		if (!strcmp(curSymbolName, symbolName)) {
-			return _litehook_sign_if_executable((void *)((uintptr_t)header + symEntry->n_value), header);
+			if (slide == -1) slide = 0;
+			return _litehook_sign_if_executable((void *)((uintptr_t)header + symEntry->n_value), slide, header);
 		}
 	}
 
@@ -415,7 +415,8 @@ void *litehook_find_dsc_symbol(const char *imagePath, const char *symbolName)
 		char curSymbolName[len+1];
 		if (fread(curSymbolName, len+1, 1, symbolDSC) != 1) goto end;
 		if (!strcmp(curSymbolName, symbolName)) {
-			symbol = _litehook_sign_if_executable((void *)(litehook_get_dsc_slide() + n.n_value), NULL);
+			uintptr_t slide = litehook_get_dsc_slide();
+			symbol = _litehook_sign_if_executable((void *)(slide + n.n_value), slide, NULL);
 		}
 	}
 
