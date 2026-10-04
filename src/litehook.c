@@ -234,23 +234,36 @@ uintptr_t litehook_get_dsc_slide(void)
 
 bool is_pointer_to_instructions(const mach_header_u *header, uintptr_t ptr)
 {
-	const struct load_command *lc =
-		(const struct load_command *)((const uint8_t *)header + sizeof(struct mach_header_64));
+	uint64_t vmBase = UINT64_MAX;
+	const struct load_command *lc;
 
+	lc = (const struct load_command *)((const uint8_t *)header + sizeof(mach_header_u));
 	for (uint32_t i = 0; i < header->ncmds; i++) {
 		if (lc->cmd == LC_SEGMENT_64) {
-			const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
-			const struct section_64 *sect =
-				(const struct section_64 *)((const uint8_t *)seg + sizeof(struct segment_command_64));
+			const segment_command_u *seg = (const segment_command_u *)lc;
+			if (strncmp(seg->segname, "__PAGEZERO", sizeof(seg->segname)) != 0) {
+				if (seg->vmaddr < vmBase) {
+					vmBase = seg->vmaddr;
+				}
+			} 
+		}
+		lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+	}
+
+	lc = (const struct load_command *)((const uint8_t *)header + sizeof(mach_header_u));
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		if (lc->cmd == LC_SEGMENT_64) {
+			const segment_command_u *seg = (const segment_command_u *)lc;
+			const section_u *sect =
+				(const section_u *)((const uint8_t *)seg + sizeof(segment_command_u));
 
 			for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
-				uint64_t sectStart = (uintptr_t)header + sect->addr;
+				uint64_t sectStart = (uintptr_t)header + (sect->addr - vmBase);
 				uint64_t sectEnd   = sectStart + sect->size;
 
 				if ((ptr >= sect->addr) && (ptr < sectEnd)) {
-					uint32_t attrs = sect->flags & SECTION_ATTRIBUTES_USR;
-					return (attrs & S_ATTR_PURE_INSTRUCTIONS) ||
-						   (attrs & S_ATTR_SOME_INSTRUCTIONS);
+					return (sect->flags & S_ATTR_PURE_INSTRUCTIONS) ||
+						   (sect->flags & S_ATTR_SOME_INSTRUCTIONS);
 				}
 			}
 		}
@@ -278,36 +291,36 @@ void *_litehook_sign_if_executable(void *ptr, const mach_header_u *optHeader)
 
 void *litehook_find_symbol(const mach_header_u *header, const char *symbolName)
 {
+	uint64_t vmBase = UINT64_MAX;
 	struct symtab_command *symtabCommand = NULL;
 	segment_command_u *linkeditSegCommand = NULL;
+	const struct load_command *lc;
 
-	uint32_t slide = -1;
-
-	uint32_t off = 0;
-	for (uint32_t i = 0; i < header->ncmds && off < header->sizeofcmds; i++) {
-		struct load_command *lc = (struct load_command *)((uintptr_t)header + sizeof(mach_header_u) + off);
-
+	lc = (const struct load_command *)((const uint8_t *)header + sizeof(mach_header_u));
+	for (uint32_t i = 0; i < header->ncmds; i++) {
 		if (lc->cmd == LC_SYMTAB) {
 			symtabCommand = (struct symtab_command *)lc;
 		}
 		else if (lc->cmd == LC_SEGMENT_U) {
-			segment_command_u *segCmd = (segment_command_u *)lc;
-			if (slide == -1) {
-				slide = (uintptr_t)header - segCmd->vmaddr;
+			segment_command_u *seg = (segment_command_u *)lc;
+
+			if (strncmp(seg->segname, "__PAGEZERO", sizeof(seg->segname)) != 0) {
+				if (seg->vmaddr < vmBase) {
+					vmBase = seg->vmaddr;
+				}
 			}
-			if (!strncmp(segCmd->segname, "__LINKEDIT", sizeof(segCmd->segname))) {
-				linkeditSegCommand = segCmd;
+
+			if (!strncmp(seg->segname, "__LINKEDIT", sizeof(seg->segname))) {
+				linkeditSegCommand = seg;
 			}
 		}
-
-		if (symtabCommand && linkeditSegCommand) break;
-
-		off += lc->cmdsize;
+	
+		lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
 	}
 
 	if (!symtabCommand || !linkeditSegCommand) return NULL;
 
-	uint8_t *linkedit = (uint8_t *)((uintptr_t)header + linkeditSegCommand->vmaddr);
+	uint8_t *linkedit = (uint8_t *)((uintptr_t)header + (linkeditSegCommand->vmaddr - vmBase));
 
 	nlist_u *syms = (nlist_u *)(linkedit + (symtabCommand->symoff - linkeditSegCommand->fileoff));
 	char *strtbl = (char *)(linkedit + (symtabCommand->stroff - linkeditSegCommand->fileoff));
@@ -317,7 +330,7 @@ void *litehook_find_symbol(const mach_header_u *header, const char *symbolName)
 		nlist_u *symEntry = &syms[i];
 
 		uint32_t stroff = symEntry->n_un.n_strx;
-		if (stroff >= strtblSize || off == 0) {
+		if (stroff >= strtblSize) {
 			continue;
 		}
 
@@ -331,7 +344,7 @@ void *litehook_find_symbol(const mach_header_u *header, const char *symbolName)
 		}
 
 		if (!strcmp(curSymbolName, symbolName)) {
-			return _litehook_sign_if_executable((void *)((uintptr_t)header + symEntry->n_value), header);
+			return _litehook_sign_if_executable((void *)((uintptr_t)header + (symEntry->n_value - vmBase)), header);
 		}
 	}
 
@@ -545,15 +558,17 @@ void litehook_rebind_symbol(const mach_header_u *targetHeader, void *replacee, v
 		}
 	}
 	else {
-		struct load_command *lcp = (void *)((uintptr_t)targetHeader + sizeof(mach_header_u));
+		const struct load_command *lc;
+
+		lc = (const struct load_command *)((const uint8_t *)targetHeader + sizeof(mach_header_u));
 		for(int i = 0; i < targetHeader->ncmds; i++) {
-			if (lcp->cmd == LC_SEGMENT_U) {
-				segment_command_u *segCmd = (segment_command_u *)lcp;
-				if (!strncmp(segCmd->segname, "__AUTH_CONST", sizeof(segCmd->segname)) ||
-					!strncmp(segCmd->segname, "__DATA_CONST", sizeof(segCmd->segname)) ||
-					!strncmp(segCmd->segname, "__DATA", sizeof(segCmd->segname))) {
-					section_u *sections = (void *)((uintptr_t)lcp + sizeof(segment_command_u));
-					for (int j = 0; j < segCmd->nsects; j++) {
+			if (lc->cmd == LC_SEGMENT_U) {
+				segment_command_u *seg = (segment_command_u *)lc;
+				if (!strncmp(seg->segname, "__AUTH_CONST", sizeof(seg->segname)) ||
+					!strncmp(seg->segname, "__DATA_CONST", sizeof(seg->segname)) ||
+					!strncmp(seg->segname, "__DATA", sizeof(seg->segname))) {
+					section_u *sections = (void *)((uintptr_t)lc + sizeof(segment_command_u));
+					for (int j = 0; j < seg->nsects; j++) {
 						if ((sections[j].flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS || 
 							(sections[j].flags & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS) {
 							_litehook_rebind_symbol_in_section(targetHeader, &sections[j], replacee, replacement);
@@ -561,7 +576,8 @@ void litehook_rebind_symbol(const mach_header_u *targetHeader, void *replacee, v
 					}
 				}
 			}
-			lcp = (void *)((uintptr_t)lcp + lcp->cmdsize);
+
+			lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
 		}
 	}
 }

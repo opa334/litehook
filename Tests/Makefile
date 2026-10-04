@@ -2,13 +2,22 @@ TARGET = litehook_tests
 
 CC = clang
 
-CFLAGS = -framework Foundation -framework CoreServices -framework Security -I../src -I../external/include -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -arch armv7 -arch arm64 -arch arm64e -miphoneos-version-min=10.0
+CFLAGS_MACOS = -arch arm64 -arch arm64e
+CFLAGS_IOS   = -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -arch arm64 -arch arm64e -miphoneos-version-min=10.0
+CFLAGS       = -I../src -I../external/include
+LDFLAGS      = -framework Foundation -framework CoreServices -framework Security
 
-sign: $(TARGET)
+all: $(TARGET).ios $(TARGET).macos sign
+
+sign: $(TARGET).ios
 	@ldid -Sentitlements.plist $<
 
-$(TARGET): $(wildcard *.c ../src/*.c)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+$(TARGET).ios: $(wildcard *.c ../src/*.c)
+	$(CC) $(CFLAGS) $(CFLAGS_IOS) $(LDFLAGS) -o $@ $^
+
+$(TARGET).macos: $(wildcard *.c ../src/*.c)
+	$(CC) $(CFLAGS) $(CFLAGS_MACOS) $(LDFLAGS) -o $@ $^
 
 clean:
-	@rm -f $(TARGET)
+	@rm -f $(TARGET).macos
+	@rm -f $(TARGET).ios

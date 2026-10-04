@@ -1,42 +1,61 @@
 #include "litehook.h"
 
+#include <stdlib.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <mach-o/dyld.h>
 #include <dyld_cache_format.h>
 
-int bind_hook(int a1, const struct sockaddr *a2, socklen_t a3)
+uint32_t *test_global = NULL;
+void test_function(void)
 {
-	return 0;
+	printf("test\n");
 }
 
-int main(int argc, const char *argv[])
+const mach_header_u *gMainHeader;
+const struct mach_header_u* _NSGetMachExecuteHeader();
+
+int bind_hook(int a1, const struct sockaddr *a2, socklen_t a3)
 {
-	uint32_t executablePathSize = 0;
-	_NSGetExecutablePath(NULL, &executablePathSize);
-	char executablePath[executablePathSize];
-	_NSGetExecutablePath(executablePath, &executablePathSize);
-	
-	const struct mach_header *mainBinHeader = NULL;
-	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-		const char *name = _dyld_get_image_name(i);
-		if (!strcmp(name, executablePath)) {
-			mainBinHeader = _dyld_get_image_header(i);
-		}
-	}
+	return 0x42;
+}
 
-	printf("About to test rebind...\n");
-
-	litehook_rebind_symbol((mach_header*)mainBinHeader, bind, bind_hook, NULL);
-
-	//getchar();
-
-	if (bind(0, NULL, 0) != 0) {
+void test_rebind(void)
+{
+	litehook_rebind_symbol((mach_header_u*)gMainHeader, bind, bind_hook, NULL);
+	if (bind(0, NULL, 0) != 0x42) {
 		printf("Failed rebind\n");
-		return -1;
+		exit(-1);
 	}
 	else {
 		printf("Rebind success!!!\n");
 	}
+}
+
+void test_symbol_finder(void)
+{
+	uint32_t **global = litehook_find_symbol(gMainHeader, "_test_global");
+	void (*function) = litehook_find_symbol(gMainHeader, "_test_function");
+
+	if ((uint64_t)global != (uint64_t)&test_global) {
+		printf("Failed test_global mismatch (%p, expected %p)\n", global, &test_global);
+		exit(-1);
+	}
+
+	if ((uint64_t)function != (uint64_t)test_function) {
+		printf("Failed test_function mismatch (%p, expected %p)\n", function, test_function);
+		exit(-1);
+	}
+
+	printf("Symbol finder success!!!\n");
+}
+
+int main(int argc, const char *argv[])
+{
+	gMainHeader = (const mach_header_u *)_NSGetMachExecuteHeader();
+
+	test_symbol_finder();
+	test_rebind();
 
 	return 0;
 }
